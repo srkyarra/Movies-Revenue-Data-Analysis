@@ -1,0 +1,1286 @@
+---
+title: "UNDERSTANDING THE REVENUE AND CONSUMER RATINGS OF MOVIES"
+author: "Emma Stefanovich"
+date: "2023-10-16"
+output:
+  word_document: default
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Setup
+
+```{r}
+# Import data
+movies <- read.csv("tmdb_5000_movies.csv", header = T, na.strings = c("", " ", "NA"))
+
+# Set seed
+set.seed(12345)
+```
+
+```{r}
+# Load necessary libraries
+library(dplyr)
+library(jsonlite)
+library(stringr)
+library(ggplot2)
+library(dplyr)
+library(lubridate)
+library(fastDummies)
+library(tidyverse)
+library(car)
+library(caTools)
+```
+
+# Data Description
+
+This dataset is called [TMDB 5000 Movie Dataset](https://www.kaggle.com/datasets/tmdb/tmdb-movie-metadata). It contains information on movies from [The Movie Database.](https://www.themoviedb.org/?language=en-US) It has 4,803 observations. It has data on movies released from 1916 to 2016.
+
+It contains the following variables:
+- *budget*: The budget of the movie's production, in USD.
+- *genres*: A list of genres applicable to the movie.
+- *homepage*: The movie's website, if it has one.
+- *id*: The movie's ID number in The Movie Database.
+- *keywords*: The list of keywords associated with the movie in The Movie Database.
+- *original_language*: The original language the movie was produced in, given in ISO 639-1 code format.
+- *original_title*: The original name the movie was released with.
+- *overview*: The description of the move in The Movie Database.
+- *popularity*: The current popularity score of the movie in The Movie Database, determined by the average number of users searching for the movie per day.
+- *production_companies*: A list of production companies that created the movie.
+- *production_countries*: A list of countries the movie was produced in.
+- *release_date*: The date on which the movie was first released.
+- *revenue*: The total earnings of the movie, in USD.
+- *runtime*: The length of the movie in minutes.
+- *spoken_languages*: The language(s) that the movie is currently available in.
+- *status*: If the movie has been released, rumored to be released soon, or is in post-production.
+- *tagline*: The tagline of the movie in The Movie Database.
+- *title*: The current title of the movie.
+- *vote_average*: The average user review score of the movie in The Movie Database.
+- *vote_count*: The number of users who reviewed and scored the movie.
+
+Not all of these variables are useful for analysis. We will be excluding the following variables from any analyses:
+- *homepage* (website url, unnecessary text)
+- *id* (unnecessary id column)
+- *keywords* (unnecessary text)
+- *original_language* (unnecessary information, will use spoken_languages instead)
+- *original_title* (unnecessary text)
+- *overview* (unnecessary text)
+- *status* (unnecessary information)
+- *tagline* (unnecessary text)
+- *title* (unnecessary text)
+
+```{r}
+movies <- select(movies, -c(homepage, id, keywords, original_language, original_title, overview, status, tagline, title))
+```
+
+The rest of the variables will be useful for analysis. 
+The main variables we want to predict using various models are *revenue* and *vote_average*, to see what factors contribute to a movie's overall success.
+
+# Data Cleaning
+
+## Overview
+
+We'll start by looking at what the data looks like, seeing if there are any issues we can fix, and looking for missing values.
+
+```{r}
+# Get a general idea of what the data looks like
+head(movies)
+```
+
+## JSON Columns
+
+Some columns are in JSON format, and are not usable in this state. We can extract the necessary values from them with the jsonlite package.
+
+The following columns need fixing:
+- *genres*
+- *production_companies*
+- *production_countries*
+- *spoken_languages*
+
+For *production_countries* and *spoken_languages*, the JSON contains both the name of the country/language and the ISO code of the country/language. We will be extracting both, and creating new columns for the ISO codes.
+
+```{r}
+# genre
+movies$genres <- lapply(movies$genre, function(json_data) {
+  genre_list <- fromJSON(json_data)
+  genre_names <- genre_list$name
+  return(paste(genre_names, collapse = ", "))
+})
+
+# production companies
+movies$production_companies <- lapply(movies$production_companies, function(json_data) {
+  company_list <- fromJSON(json_data)
+  company_names <- company_list$name
+  return(paste(company_names, collapse = ", "))
+})
+
+# production country ISO codes
+movies$production_ISO <- lapply(movies$production_countries, function(json_data) {
+  country_list <- fromJSON(json_data)
+  country_ISO <- country_list$iso_3166_1
+  return(paste(country_ISO, collapse = ", "))
+})
+
+# production countries
+movies$production_countries <- lapply(movies$production_countries, function(json_data) {
+  country_list <- fromJSON(json_data)
+  country_names <- country_list$name
+  return(paste(country_names, collapse = ", "))
+})
+
+# spoken languages ISO codes
+movies$spoken_ISO <- lapply(movies$spoken_languages, function(json_data) {
+  language_list <- fromJSON(json_data)
+  language_ISO <- language_list$iso_639_1
+  return(paste(language_ISO, collapse = ", "))
+})
+
+# spoken languages
+movies$spoken_languages <- lapply(movies$spoken_languages, function(json_data) {
+  language_list <- fromJSON(json_data)
+  language_names <- language_list$name
+  return(paste(language_names, collapse = ", "))
+})
+```
+
+```{r}
+# Ensure new columns' data types are correct - should be of type list
+class(movies$genres)
+class(movies$production_companies)
+class(movies$production_countries)
+class(movies$production_ISO)
+class(movies$spoken_languages)
+class(movies$spoken_ISO)
+```
+
+## Categorical Column Values
+
+Next, let's see if there are any issues with the categorical variables, such as misspelled, duplicate, or generally unexpected categories. We will not look at the individual distinct *production_companies* because there would be too many distinct values to examine, but we will still get a count of distinct values.
+
+Distinct values for categorical columns:
+```{r}
+# genres
+print("--- genres: ---")
+unique_genres <- unique(unlist(strsplit(as.character(movies$genres), ", ")))
+unique_genres
+
+length(as.list(unique_genres))
+
+# production companies
+print("--- production companies: ---")
+unique_prod_companies <- unique(unlist(strsplit(as.character(movies$production_companies), ", ")))
+
+length(as.list(unique_prod_companies))
+
+# production countries
+print("--- production countries: ---")
+unique_prod_countries <- unique(unlist(strsplit(as.character(movies$production_countries), ", ")))
+unique_prod_countries
+
+length(as.list(unique_prod_countries))
+
+# production countries ISO codes
+print("--- production countries ISO codes: ---")
+unique_prod_ISO <- unique(unlist(strsplit(as.character(movies$production_ISO), ", ")))
+unique_prod_ISO
+
+length(as.list(unique_prod_ISO))
+
+# spoken languages
+print("--- spoken languages: ---")
+unique_spoken_languages <- unique(unlist(strsplit(as.character(movies$spoken_languages), ", ")))
+unique_spoken_languages
+
+length(as.list(unique_spoken_languages))
+
+# spoken languages ISO codes
+print("--- spoken language ISO codes: ---")
+unique_spoken_ISO <- unique(unlist(strsplit(as.character(movies$spoken_ISO), ", ")))
+unique_spoken_ISO
+
+length(as.list(unique_spoken_ISO))
+```
+
+- *genres*: There is nothing unexpected here. Each genre is listed only once, with no misspellings or duplicates. There are 20 unique genres.
+- *production_companies*: There are 5,025 unique production companies.
+- *production_countries*: There seem to be some country names that are unexpected. For example, Serbia is listed twice - once as "Serbia" and again as "Serbia and Montenegro". Regardless, there are 88 unique country names.
+- *production_countries ISO*: There is nothing unexpected here. Each country ISO is listed only once, with no misspellings or duplicates. There are 88 unique country ISO codes, which matches the previous 88 unique country names.
+- *spoken_languages*: There seem to be some invalid language names here. For example, there is a blank ("") language, a bunch of question marks ("??????"), and "No Language". We will consider turning these entries into null values depending on how many there are.
+- *spoken_language ISO*: There seem to be some invalid language codes here, like "xx". Regardless, there are 87 unique spoken language ISO codes.
+
+We will be using the ISO code variables from now on, for the sake of simplicity and reliability. The ISO code variables have far fewer issues than the variables that use language and country names.
+
+Remove variables replaced by new ISO code variables:
+```{r}
+movies <- select(movies, -c(production_countries, spoken_languages))
+```
+
+## Language and Country ISO Codes
+
+Now, let's look at exactly which language and country codes are invalid. These lists of valid ISO 639-1 language codes and ISO 3166-1 country codes come from the ISO website.
+
+Define lists of valid language and country ISO codes:
+```{r}
+valid_language_codes <- c("ab","aa","af","ak","sq","am","ar","an","hy","as","av","ae","ay","az","bm","ba","eu","be","bn","bi","bs","br","bg","my","ca","km","ch","ce","ny","zh","cu","cv","kw","co","cr","hr","cs","da","dv","nl","dz","en","eo","et","ee","fo","fj","fi","fr","ff","gd","gl","lg","ka","de","el","gn","gu","ht","ha","he","hz","hi","ho","hu","is","io","ig","id","ia","ie","iu","ik","ga","it","ja","jv","kl","kn","kr","ks","kk","ki","rw","ky","kv","kg","ko","kj","ku","lo","la","lv","li","ln","lt","lu","lb","mk","mg","ms","ml","mt","gv","mi","mr","mh","mn","na","nv","ng","ne","nd","se","no","nb","nn","oc","oj","or","om","os","pi","ps","fa","pl","pt","pa","qu","ro","rm","rn","ru","sm","sg","sa","sc","sr","sn","ii","sd","si","sk","sl","so","nr","st","es","su","sw","ss","sv","tl","ty","tg","ta","tt","te","th","bo","ti","to","ts","tn","tr","tk","tw","ug","uk","ur","uz","ve","vi","vo","wa","cy","fy","wo","xh","yi","yo","za","zu")
+
+valid_country_codes <- c("AF","AX","AL","DZ","AS","AD","AO","AI","AQ","AG","AR","AM","AW","AU","AT","AZ","BS","BH","BD","BB","BY","BE","BZ","BJ","BM","BT","BO","BQ","BA","BW","BV","BR","IO","BN","BG","BF","BI","CV","KH","CM","CA","KY","CF","TD","CL","CN","CX","CC","CO","KM","CD","CG","CK","CR","CI","HR","CS","CU","CW","CY","CZ","DK","DJ","DM","DO","EC","EG","SV","GQ","ER","EE","SZ","ET","FK","FO","FJ","FI","FR","GF","PF","TF","GA","GM","GE","DE","GH","GI","GR","GL","GD","GP","GU","GT","GG","GN","GW","GY","HT","HM","VA","HN","HK","HU","IS","IN","ID","IR","IQ","IE","IM","IL","IT","JM","JP","JE","JO","KZ","KE","KI","KP","KR","KW","KG","LA","LV","LB","LS","LR","LY","LI","LT","LU","MO","MK","MG","MW","MY","MV","ML","MT","MH","MQ","MR","MU","YT","MX","FM","MD","MC","MN","ME","MS","MA","MZ","MM","NA","NR","NP","NL","NC","NZ","NI","NE","NG","NU","NF","MP","NO","OM","PK","PW","PS","PA","PG","PY","PE","PH","PN","PL","PT","PR","QA","RE","RO","RU","RW","BL","SH","KN","LC","MF","PM","VC","WS","SM","ST","SA","SN","RS","SC","SL","SG","SX","SK","SI","SB","SO","ZA","GS","SS","ES","LK","SD","SR","SJ","SE","CH","SY","TW","TJ","TZ","TH","TL","TG","TK","TO","TT","TN","TR","TM","TC","TV","UG","UA","AE","GB","UM","US","UY","UZ","VU","VE","VN","VG","VI","WF","EH","YE","ZM","ZW")
+```
+
+Find which codes in data are invalid:
+```{r}
+print("spoken_languages ISO:")
+setdiff(unique_spoken_ISO, valid_language_codes)
+
+print("production_countries ISO:")
+setdiff(unique_prod_ISO, valid_country_codes)
+```
+
+From these results, we can see that there are 3 invalid language codes in spoken_languages (cn, sh, xx) and no invalid country codes in production_countries.
+
+Upon searching for these language codes online, it appears that:
+- "cn" is likely supposed to be for Chinese (whose real code is "zh"), as "CN" is the valid country code for China
+- "sh" used to be a valid code, for Serbo-Croatian, but is currently no longer in use - this is likely why Serbia was listed twice in production_countries
+- "xx" is a unique identifier for when a movie has no language or subtitles
+
+From these results, we will add "sh" and "xx" to the list of valid languages, as "sh" used to be valid and is likely present from older movies, and "xx" denotes movies with no language, which is not an error with the data. We will not add "cn" as there is no evidence that this code was ever a valid code, and is likely an error in the data. However, we will fix the data to replace all instances of "cn" in language variables with "zh".
+
+Add "sh" and "xx" to list of valid language codes:
+```{r}
+valid_language_codes <- append(valid_language_codes, "sh")
+valid_language_codes <- append(valid_language_codes, "xx")
+```
+
+Replace "cn" with "zh" in spoken_ISO, and check replacement success:
+```{r}
+# Check for "cn" in spoken_ISO - should say it is
+if ("cn" %in% movies$spoken_ISO) {print("cn is present in spoken_ISO")} else {print("cn is not present in spoken_ISO")}
+
+# Replace "cn" with "zh" in spoken_ISO column
+movies$spoken_ISO <- str_replace_all(movies$spoken_ISO, "cn", "zh")
+
+# Check if it worked
+if (!("cn" %in% movies$spoken_ISO)) {print("cn removed from spoken_ISO")} else {print("cn is still present in spoken_ISO")}
+```
+
+## Release Date
+
+Next, it appears that *release_date* is of type character. We will convert it to type date. We will also create new columns called *release_year* and *release_month*. We will also remove *release_date*, as *release_year* will be enough for our analysis.
+
+```{r}
+movies$release_date <- as.Date(movies$release_date)
+
+movies$release_year <- year(movies$release_date)
+  
+movies$release_month <- month(movies$release_date)
+
+movies <- select(movies, -c(release_date))
+```
+
+It also seems that although the data ranges from 1916 to 2016, there is one row for a movie that was scheduled to release in 2017. It has incomplete data, so we will remove it.
+
+```{r}
+movies <- filter(movies, release_year != 2017)
+```
+
+## Null Values
+
+Finally, we should look for any null values to see if any variables are missing a substantial amount of data. We should turn any blank values in the dataset into null values for consistency. Additionally, we will turn revenues and vote_averages of 0 into null values, as a zero for either of these columns means there is no data available.
+
+Turn blank values, revenues of 0, and vote_averages of 0 into NA values:
+```{r}
+movies[movies == ""] <- NA
+movies$revenue <- ifelse(movies$revenue == 0, NA, movies$revenue)
+movies$vote_average <- ifelse(movies$vote_average == 0, NA, movies$vote_average)
+```
+
+Number of null values per column:
+```{r}
+# Look for null values in dataset
+movies %>% summarise(across(everything(), ~ sum(is.na(.))))
+```
+
+There are null values in:
+- *genres* (27): negligible.
+- *production_companies* (349): negligible.
+- *revenue* (1,425): this is unfortunately quite a bit of missing data, but there is still plenty left to use for analysis.
+- *runtime* (2): negligible.
+- *vote_average* (62): negligible.
+- *spoken_languages* (86): negligible.
+- *production_ISO* (172): negligible.
+- *spoken_ISO* (85): negligible. However, since the "xx" ISO code means a movie has no language or subtitles available in the original data, we will change all NA values in this column to "xx" for the sake of consistency.
+
+```{r}
+# Change NA values in spoken_ISO to "xx"
+movies$spoken_ISO <- ifelse(is.na(movies$spoken_ISO), "xx", movies$spoken_ISO)
+
+# Check if this worked - should return 0
+sum(is.na(movies$spoken_ISO))
+```
+
+Now that the data has been cleaned, we can begin exploring it.
+
+# Exploration
+
+```{r}
+options(scipen = 999)
+
+attach(movies)
+```
+
+As a reminder, these are the variables we will include in our analysis:
+
+Outcome variables (2):
+- *revenue*
+- *vote_average*
+
+Categorical variables (4):
+- *genres*
+- *production_companies*
+- *production_ISO*
+- *spoken_ISO*
+
+Numerical variables (4):
+- *budget*
+- *popularity*
+- *runtime*
+- *vote_count*
+
+Temporal variables (2):
+- *release_year*
+- *release_month*
+
+## Outcome Variables
+
+- *revenue*
+- *vote_average*
+
+First, let's look at the two outcome variables: *revenue* and *vote_average*.
+
+Five-number summaries and distributions:
+```{r}
+# revenue
+summary(revenue)
+
+ggplot(movies, aes(x = revenue)) +
+  geom_histogram(fill = "darkgreen", color = "darkgreen") +
+  theme_minimal()
+
+# vote_average
+summary(vote_average)
+
+ggplot(movies, aes(x = vote_average)) +
+  geom_histogram(fill = "gold", color = "gold") +
+  theme_minimal()
+```
+
+The distributions show some interesting patterns.
+
+*revenue*: 
+- The distribution seen here is heavily right-skewed.
+- It seems that most movies have revenues of less than 500,000,000.
+- Only a very small portion of movies have revenues above 1,000,000,000.
+
+*vote_average*: 
+- The distribution seen here is approximately normal/symmetric, with a very slight left skew.
+- It seems that most movies receive scores between 5.0 and 7.5, around 6.25.
+- There are noticeable spikes around scores of 0.0 and 5.0.
+
+## Transformation on revenue
+
+Because of the heavy right-skewed distribution of revenue, we will try a transformation on this variable for later use.
+
+We will try a variety of transformations and pick the one that gives us the most normal distribution.
+
+```{r}
+# natural log
+ggplot(movies, aes(x = log(revenue))) +
+  geom_histogram(fill = "darkgreen", color = "darkgreen") +
+  theme_minimal()
+
+# inverse
+ggplot(movies, aes(x = 1/(revenue))) +
+  geom_histogram(fill = "darkgreen", color = "darkgreen") +
+  theme_minimal()
+
+# exponential
+ggplot(movies, aes(x = exp(revenue))) +
+  geom_histogram(fill = "darkgreen", color = "darkgreen") +
+  theme_minimal()
+
+# square root
+ggplot(movies, aes(x = sqrt(revenue))) +
+  geom_histogram(fill = "darkgreen", color = "darkgreen") +
+  theme_minimal()
+
+# cube root
+ggplot(movies, aes(x = (revenue)^(1/3))) +
+  geom_histogram(fill = "darkgreen", color = "darkgreen") +
+  theme_minimal()
+
+# 4th root
+ggplot(movies, aes(x = (revenue)^(1/4))) +
+  geom_histogram(fill = "darkgreen", color = "darkgreen") +
+  theme_minimal()
+
+# 5th root
+ggplot(movies, aes(x = (revenue)^(1/5))) +
+  geom_histogram(fill = "darkgreen", color = "darkgreen") +
+  theme_minimal()
+
+# 6th root
+ggplot(movies, aes(x = (revenue)^(1/6))) +
+  geom_histogram(fill = "darkgreen", color = "darkgreen") +
+  theme_minimal()
+
+# 7th root
+ggplot(movies, aes(x = (revenue)^(1/7))) +
+  geom_histogram(fill = "darkgreen", color = "darkgreen") +
+  theme_minimal()
+```
+
+The natural log, inverse, and exponential transformations do not help in any way. However, the square root transformation helped normalize the distribution a little. So, we can increase the power of the root until we get a normal distribution. Doing so, we find that a 6th root provides a normal distribution (7th root starts to be slightly left-skewed). So, we will use the 6th root transformation on *revenue*.
+
+We will use this new transformed variable for our models later on, but for data exploration, we will use the untransformed *revenue*.
+
+```{r}
+movies$rt_revenue <- (movies$revenue)^(1/6) # using 6th root transformation
+```
+
+## Categorical Variables
+
+- *genres*
+- *production_companies*
+- *production_ISO*
+- *spoken_ISO*
+
+For the categorical variables, we will visualize the number of occurrences of each unique value.
+
+```{r}
+# genres
+all_genres <- unlist(strsplit(as.character(genres), ", "))
+df_genres <- data.frame(Item = names(table(all_genres)), Count = as.vector(table(all_genres)))
+
+ggplot(df_genres, aes(y = Count, x = reorder(Item, Count))) +
+  geom_bar(stat = "identity", fill = "red") +
+  labs(y = "Count", x = "Genre") +
+  ggtitle("Count of Unique Genres") +
+  theme_minimal() +
+  coord_flip()
+
+# production_companies
+all_prod_companies <- unlist(strsplit(as.character(production_companies), ", "))
+df_prod_companies <- data.frame(Item = names(table(all_prod_companies)), Count = as.vector(table(all_prod_companies)))
+df_prod_companies_small <- subset(df_prod_companies, Count >= 30) # Too many companies to visualize, so only include companies with 30 or more movies produced
+
+ggplot(df_prod_companies_small, aes(y = Count, x = reorder(Item, Count))) +
+  geom_bar(stat = "identity", fill = "blue") +
+  labs(y = "Count", x = "Production Company") +
+  ggtitle("Count of Unique Production Companies") +
+  theme_minimal() +
+  coord_flip()
+
+# production_ISO
+all_prod_ISO <- unlist(strsplit(as.character(production_ISO), ", "))
+df_prod_ISO <- data.frame(Item = names(table(all_prod_ISO)), Count = as.vector(table(all_prod_ISO)))
+df_prod_ISO_small <- subset(df_prod_ISO, Count >= 5) # Too many countries to visualize, so only include companies with 5 or more movies produced
+
+ggplot(df_prod_ISO_small, aes(y = Count, x = reorder(Item, -Count))) +
+  geom_bar(stat = "identity", fill = "green") +
+  labs(y = "Count", x = "Production Country") +
+  ggtitle("Count of Unique Production Country ISOs") +
+  theme_minimal()
+
+# spoken_ISO
+all_spoken_ISO <- unlist(strsplit(as.character(spoken_ISO), ", "))
+df_spoken_ISO <- data.frame(Item = names(table(all_spoken_ISO)), Count = as.vector(table(all_spoken_ISO)))
+df_spoken_ISO_small <- subset(df_spoken_ISO, Count >= 5) # Too many languages to visualize, so only include companies with 5 or more movies produced
+
+ggplot(df_spoken_ISO_small, aes(y = Count, x = reorder(Item, -Count))) +
+  geom_bar(stat = "identity", fill = "orange") +
+  labs(y = "Count", x = "Spoken Language") +
+  ggtitle("Count of Unique Spoken Language ISOs") +
+  theme_minimal()
+```
+
+From these bar graphs, we can see that: 
+- some *genres* are far more common than others (like Drama and Comedy)
+- some *production_companies* make far more movies than others (like Warner Bros. and Universal Pictures)
+- English is by far the most common language for *spoken_language*
+- the United States is by far the most common of the  *production_countries*
+
+### Major Production Companies
+
+We want to include *production_companies* in our analysis, but there are thousands of unique companies in the data. So, let's create a new variable saying if a movie was produced by a major production company or not. First, let's examine the table we created of each production company and how many movies they've produced to find what constitutes a "major producer".
+
+```{r}
+summary(df_prod_companies$Count)
+```
+
+These results are not particularly useful, as there is a huge portion of production companies that have only made one or two movies. So, let's only look at companies than have made more than two movies.
+
+```{r}
+df_prod_companies_more_than_two <- subset(df_prod_companies, Count > 2)
+summary(df_prod_companies_more_than_two$Count)
+```
+
+From these results, we can see that among production companies that have produced more than two movies:
+- The minimum and 1st quartile of number of movies is 3
+- The median number of movies produced is 5
+- The mean number of movies produced is about 11
+- The 3rd quartile of number of movies is 9
+- The maximum number of movies produced is 349
+
+From these results, we can say that a major movie production company is any company that has produced more than 10 movies, since this would place it in above the mean.
+
+```{r}
+df_prod_companies_major <- subset(df_prod_companies, Count > 10)
+```
+
+We will define a new binary variable saying if a movie has been produced by a major production company or not.
+
+```{r}
+movies$major_prod_company <- sapply(strsplit(as.character(production_companies), ", "), function(companies) {
+  any(companies %in% df_prod_companies_major$Item)
+})
+```
+
+Let's examine this new *major_prod_company* variable.
+
+```{r}
+df_major_prod_company <- data.frame(
+  Category = c("TRUE", "FALSE"),
+  Count = c(sum(movies$major_prod_company == TRUE), sum(movies$major_prod_company == FALSE))
+)
+
+print(df_major_prod_company)
+
+ggplot(df_major_prod_company, aes(y = Count, x = reorder(Category, -Count))) +
+  geom_bar(stat = "identity", fill = "turquoise") +
+  labs(y = "Count", x = "Produced by Major Production Company") +
+  ggtitle("Count of Movies Made by Major Production Companies") +
+  theme_minimal()
+```
+
+From the graph and table, we can see that most movies are produced by at least one major production company.
+
+### Produced in The US, Available in English
+
+Since the vast majority of movies are produced in the US and available in English, we want to introduce new binary variables saying if a movie was produced in the US or is available in English.
+
+```{r}
+# produced in US
+movies$prod_in_US <- sapply(strsplit(as.character(production_ISO), ", "), function(prod_country) {
+  any(prod_country == "US")
+})
+
+# available in English
+movies$spoken_lang_en <- sapply(strsplit(as.character(spoken_ISO), ", "), function(spoken_lang) {
+  any(spoken_lang == "en")
+})
+```
+
+Let's examine these new variables.
+
+```{r}
+# prod_in_US
+df_prod_in_US <- data.frame(
+  Category = c("TRUE", "FALSE"),
+  Count = c(sum(movies$prod_in_US == TRUE), sum(movies$prod_in_US == FALSE))
+)
+
+print(df_prod_in_US)
+
+ggplot(df_prod_in_US, aes(y = Count, x = reorder(Category, -Count))) +
+  geom_bar(stat = "identity", fill = "purple") +
+  labs(y = "Count", x = "Produced in US") +
+  ggtitle("Count of Movies Produced in US") +
+  theme_minimal()
+
+# spoken_lang_en
+df_spoken_lang_en <- data.frame(
+  Category = c("TRUE", "FALSE"),
+  Count = c(sum(movies$spoken_lang_en == TRUE), sum(movies$spoken_lang_en == FALSE))
+)
+
+print(df_spoken_lang_en)
+
+ggplot(df_spoken_lang_en, aes(y = Count, x = reorder(Category, -Count))) +
+  geom_bar(stat = "identity", fill = "navy") +
+  labs(y = "Count", x = "Available in English") +
+  ggtitle("Count of Movies Available in English") +
+  theme_minimal()
+```
+
+Again, from these graphs, we can see that the majority of movies are produced in the US and available in English. We will use these new binary variables in our models later on.
+
+## Numerical variables
+
+- *budget*
+- *popularity*
+- *runtime*
+- *vote_count*
+
+Now, let's explore the numerical variables.
+
+Five-number summaries and distributions:
+```{r}
+# budget
+print("budget")
+summary(budget)
+
+ggplot(movies, aes(x = budget)) +
+  geom_histogram(bins = 100, fill = "red", color = "red") +
+  theme_minimal()
+
+# popularity
+print("popularity")
+summary(popularity)
+
+ggplot(movies, aes(x = popularity)) +
+  geom_histogram(bins = 100, fill = "blue", color = "blue") +
+  theme_minimal()
+
+# runtime
+print("runtime")
+summary(runtime)
+
+ggplot(movies, aes(x = runtime)) +
+  geom_histogram(bins = 100, fill = "green", color = "green") +
+  theme_minimal()
+
+# vote_count
+print("vote_count")
+summary(vote_count)
+
+ggplot(movies, aes(x = vote_count)) +
+  geom_histogram(bins = 100, fill = "orange", color = "orange") +
+  theme_minimal()
+```
+
+*budget*, *popularity*, and *vote_count* are all heavily right-skewed. *runtime* is approximately normal with a slight right skew, with a median around 100 minutes.
+
+To see how the numeric variables are associated with the outcome variables, we can calculate the correlations between the outcome variables and the numeric variables.
+
+```{r}
+cor_vars <- movies[c("revenue", "vote_average", "budget", "popularity", "runtime", "vote_count")]
+cor(cor_vars, use = "complete.obs")
+```
+
+From the results of this correlation matrix, we can see that the following variables are correlated:
+- *revenue* and *budget* (0.71)
+- *revenue* and *popularity* (0.61)
+- *revenue* and *vote_count* (0.76)
+- *popularity* and *vote_count* (0.75)
+
+Next, let's visualize the relationships between these correlated variables.
+
+Scatterplots:
+```{r}
+# revenue vs budget
+ggplot(movies, aes(x = budget, y = revenue)) + 
+  geom_point(color = "red") +
+  geom_smooth(se = F, color = "black") +
+  theme_minimal()
+
+# revenue vs popularity
+ggplot(movies, aes(x = popularity, y = revenue)) + 
+  geom_point(color = "blue") +
+  geom_smooth(se = F, color = "black") +
+  theme_minimal()
+
+# revenue vs vote_count
+ggplot(movies, aes(x = vote_count, y = revenue)) + 
+  geom_point(color = "green") +
+  geom_smooth(se = F, color = "black") +
+  theme_minimal()
+
+# popularity vs vote_count
+ggplot(movies, aes(x = vote_count, y = popularity)) + 
+  geom_point(color = "orange") +
+  geom_smooth(se = F, color = "black") +
+  theme_minimal()
+```
+
+- *revenue* vs. *budget*: This relationship is positive and seems mostly linear.
+- *revenue* vs. *popularity*: This relationship seems positive, but it is difficult to see any particular pattern.
+- *revenue* vs. *vote_count*: This relationship is positive and seems mostly linear.
+- *popularity* vs. *vote_count*: This relationship is positive and seems mostly linear.
+
+Overall, the relationships seen between the numerical variables are not extremely strong.
+
+## Temporal variables
+
+- *release_year*
+- *release_month*
+
+Let's explore the *release_year* and *release_month* variables to see if the outcome variables vary depending on when a movie came out.
+
+```{r}
+# Count of movies per release year
+num_movies_year <- movies %>%
+  group_by(release_year) %>%
+  summarise(num_movies = n())
+
+ggplot(num_movies_year, aes(x = release_year, y = num_movies)) +
+  geom_line(color = "blue", linewidth = 1) +
+  labs(title = "Number of Movies per Release Year", x = "Year", y = "Number of Movies") +
+  theme_minimal()
+
+# Count of movies per release month
+num_movies_month <- movies %>%
+  group_by(release_month) %>%
+  summarise(num_movies = n())
+
+ggplot(num_movies_month, aes(x = month(release_month, label = TRUE), y = num_movies)) +
+  geom_bar(stat = "identity", fill = "blue") +
+  labs(x = "Month", y = "Number of Movies") +
+  ggtitle("Number of Movies per Release Month") +
+  theme_minimal()
+
+# Average movie revenue per release year
+avg_rev_year <- aggregate(revenue ~ release_year, data = movies, FUN = mean)
+
+ggplot(avg_rev_year, aes(x = release_year, y = revenue)) +
+  geom_line(color = "darkgreen", linewidth = 1) +
+  labs(title = "Average Movie Revenue per Release Year", x = "Year", y = "Average Revenue") +
+  theme_minimal()
+
+# Average movie revenue per release month
+avg_rev_month <- aggregate(revenue ~ release_month, data = movies, FUN = mean)
+
+ggplot(avg_rev_month, aes(x = month(release_month, label = TRUE), y = revenue)) +
+  geom_bar(stat = "identity", fill = "darkgreen") +
+  labs(x = "Month", y = "Average Revenue") +
+  ggtitle("Average Movie Revenue per Release Month") +
+  theme_minimal()
+
+# Average movie vote_average per release year
+avg_vote_year <- aggregate(vote_average ~ release_year, data = movies, FUN = mean)
+
+ggplot(avg_vote_year, aes(x = release_year, y = vote_average)) +
+  geom_line(color = "gold", linewidth = 1) +
+  labs(title = "Average Movie Score per Release Year", x = "Year", y = "Average Score") +
+  theme_minimal()
+
+# Average movie vote_average per release month
+avg_vote_month <- aggregate(vote_average ~ release_month, data = movies, FUN = mean)
+
+ggplot(avg_vote_month, aes(x = month(release_month, label = TRUE), y = vote_average)) +
+  geom_bar(stat = "identity", fill = "gold") +
+  labs(x = "Year", y = "Average Score") +
+  ggtitle("Average Movie Score per Release Month") +
+  theme_minimal()
+```
+
+Overall observations:
+
+- Number of movies per release year: Most of the movies in the data were released after about 1990. The sudden decline in 2016 is because the dataset does not include all of 2016.
+
+- Number of movies per release month: September is the most common month for movies to be released in, but other than that, most months have a similar amount of movies released.
+
+- Average movie revenue per release year: Aside from the spikes in revenue around the 1940's, the average revenue per year has been increasing over time. The spikes in the 1940's are likely due to the small number of movies released in those years; if some did particularly well, they drive up the average revenue for that year.
+
+- Average movie revenue per release month: It seems that May, June, July, November, and December are the most profitable months to release a movie in, while January and September are the least profitable, on average.
+
+- Average movie score per release year: Aside from the dip around 1930, it seems that average movie scores decrease for movies with more recent release years.
+
+- Average movie score per release month: The average scores are nearly uniform across all months.
+
+# Models
+
+We will first try to predict *revenue* and *vote_average* using multiple linear regression models, since both outcome variables are continuous and numerical.
+
+## Dummy Variables
+
+In order to make the classification variables usable in linear regression, we will need to use dummy variable encoding. Encoding each necessary column by hand would take a long time, as we have many categories in each categorical column. The fastDummies library makes this easy by doing it for us.
+
+```{r}
+movies_d <- select(movies, -c(production_companies, production_ISO, spoken_ISO))
+
+movies_d <- dummy_cols(
+  movies_d,
+  select_columns = c("major_prod_company", "prod_in_US", "spoken_lang_en", "release_month", "genres"),
+  remove_first_dummy = TRUE,
+  remove_selected_columns = TRUE,
+  ignore_na = TRUE,
+  split = ", "
+)
+
+movies_d <- select(movies_d, -c(genres_NA))
+movies_d <- na.omit(movies_d)
+```
+
+## Linear Regression - revenue
+
+### Model Selection
+
+We will begin by using linear regression to predict *revenue*. We will start with a basic model using all variables in the data set with dummy variables. Since revenue had a very skewed distribution, we will try using both *revenue* and *rt_revenue*, which is the 6th root of revenue, to see which gives us better results.
+
+*revenue* model with all variables:
+```{r}
+# untransformed
+lm_revenue_all <- lm(revenue ~ . - vote_average - rt_revenue, data = movies_d)
+summary(lm_revenue_all)
+
+# transformed
+lm_revenue_all_rt <- lm(rt_revenue ~ . - vote_average - revenue, data = movies_d)
+summary(lm_revenue_all_rt)
+```
+
+We will now try both backward elimination and forward selection to find the best possible model.
+
+Backward elimination:
+```{r}
+# untransformed
+lm_revenue_step_back <- step(lm_revenue_all, direction = "backward", trace = FALSE)
+lm_revenue_step_back
+
+# transformed
+lm_revenue_step_back_rt <- step(lm_revenue_all_rt, direction = "backward", trace = FALSE)
+lm_revenue_step_back_rt
+```
+
+Forward selection:
+```{r}
+# untransformed
+lm_revenue_none <- lm(revenue ~ 1, data = movies_d)
+
+lm_revenue_step_forward <- step(lm_revenue_none, direction = "forward", scope = formula(lm_revenue_all), trace = FALSE)
+lm_revenue_step_forward
+
+# transformed
+lm_revenue_none_rt <- lm(rt_revenue ~ 1, data = movies_d)
+
+lm_revenue_step_forward_rt <- step(lm_revenue_none_rt, direction = "forward", scope = formula(lm_revenue_all_rt), trace = FALSE)
+lm_revenue_step_forward_rt
+```
+
+Compare both model summaries and look for multicolinearity:
+```{r}
+# untransformed
+summary(lm_revenue_step_back)
+vif(lm_revenue_step_back)
+
+summary(lm_revenue_step_forward)
+vif(lm_revenue_step_forward)
+
+# transformed
+summary(lm_revenue_step_back_rt)
+vif(lm_revenue_step_back_rt)
+
+summary(lm_revenue_step_forward_rt)
+vif(lm_revenue_step_forward_rt)
+```
+
+Results:
+
+Backward elimination model, untransformed:
+- Uses 23 variables
+- 5 variables where p-value > 0.05
+- Adjusted R^2 value of 0.7217
+- No multicolinearity issues
+
+Forward selection model, untransformed:
+- Uses 23 variables
+- 5 variables where p-value > 0.05
+- Adjusted R^2 value of 0.7217
+- No multicolinearity issues
+
+Backward elimination model, transformed:
+- Uses 26 variables
+- 5 variables where p-value > 0.05
+- Adjusted R^2 value of 0.5863
+- No multicolinearity issues
+
+Forward selection model, transformed:
+- Uses 22 variables
+- 1 variable where p-value > 0.05
+- Adjusted R^2 value of 0.5856
+- No multicolinearity issues
+
+It seems that the untransformed forward selection model and untransformed backward elimination model arrived at the exact same model. The transformed models are different, though. It would be difficult to choose one model from these results alone, so let's investigate each model further.
+
+### Model Performance
+
+We should check the models' performance by examining the residuals vs. fits plot, the normal Q-Q plot, and looking for outliers/influential points.
+
+Studentized residuals vs predicted values:
+```{r}
+# backward
+
+plot(fitted(lm_revenue_step_back), rstandard(lm_revenue_step_back), main = "Residuals vs. Fitted Values plot for backward model")
+abline(a = 0, b = 0, col = 'black')
+
+plot(fitted(lm_revenue_step_back_rt), rstandard(lm_revenue_step_back_rt), main = "Residuals vs. Fitted Values plot for backward rt model")
+abline(a = 0, b = 0, col = 'black')
+
+# forward
+
+plot(fitted(lm_revenue_step_forward), rstandard(lm_revenue_step_forward), main = "Residuals vs. Fitted Values plot for forward model")
+abline(a = 0, b = 0, col = 'black')
+
+plot(fitted(lm_revenue_step_forward_rt), rstandard(lm_revenue_step_forward_rt), main = "Residuals vs. Fitted Values plot for forward rt model")
+abline(a = 0, b = 0, col = 'black')
+```
+The shapes and spreads of the points on all plots are not perfect, but some are better than others. The shapes of the points of all plots suggest that some heteroscedasticity is present. However, the shape in the transformed plots are closest to what we would want. Unsurprisingly, the untransformed plots are the exact same, since they use the same model. It should be noted that the transformed plots, while coming from different models, have similar shapes and distributions of points. As well, the heavy concentrations of points on all plots imply that the variability of the residuals is not even across predicted values. However, the transformed plots seem to have a slightly better distribution of points. As well, the points on the transformed plots are mostly within the -3 to 3 band, with only some points outside of it. Meanwhile, the untransformed plots have many points outside of this band. So far, the transformed models seem to be doing better.
+
+Normal probability plot of residuals:
+```{r}
+# backward
+qqnorm(rstandard(lm_revenue_step_back))
+qqline(rstandard(lm_revenue_step_back), col = 2)
+
+qqnorm(rstandard(lm_revenue_step_back_rt))
+qqline(rstandard(lm_revenue_step_back_rt), col = 2)
+
+# forward
+qqnorm(rstandard(lm_revenue_step_forward))
+qqline(rstandard(lm_revenue_step_forward), col = 2)
+
+qqnorm(rstandard(lm_revenue_step_forward_rt))
+qqline(rstandard(lm_revenue_step_forward_rt), col = 2)
+```
+
+The results from the transformed plots look better than the untransformed plots. The transformed plots have most of their points fitting well along the trendline, with only some points below the theoretical quantities of -2 veering away from the trendline. However, the untransformed plots' points are farther away from the trendline, for theoretical quantities both below -2 and above 2. Overall, the transformed plots look better here too.
+
+From the results of our investigation into these four models, we have concluded that the transformed models would be better to use for making predictions, as their residuals vs. fits plot and normal Q-Q plot gave better results than the transformed plots. Additionally, we will be using the transformed forward selection model, since it uses far fewer variables and has a nearly identical adjusted R^2 value to the backward elimination model.
+
+### Outliers/Influential Points
+
+Before we make predictions, we should look for and remove outliers/influential points.
+
+```{r}
+influencePlot(lm_revenue_step_forward_rt)
+summary(influence.measures(lm_revenue_step_forward_rt))
+```
+
+Data points 1658, 4665, 96, and 547 are outliers. We will remove them from the data and refit the model.
+
+```{r}
+# remove outliers
+movies_d_removed <- movies_d[-c(1658, 4665, 96, 547), ]
+```
+
+```{r}
+# refit model, try both backward elimination and forward selection to see if they arrive at different models this time
+
+# backward
+lm_revenue_all_rt <- lm(rt_revenue ~ . - vote_average - revenue, data = movies_d_removed)
+
+lm_revenue_step_back_rt <- step(lm_revenue_all_rt, direction = "backward", trace = FALSE)
+
+summary(lm_revenue_step_back_rt)
+vif(lm_revenue_step_back_rt)
+
+# forward
+lm_revenue_none_rt <- lm(rt_revenue ~ 1, data = movies_d_removed)
+
+lm_revenue_step_forward_rt <- step(lm_revenue_none_rt, direction = "forward", scope = formula(lm_revenue_all_rt), trace = FALSE)
+
+summary(lm_revenue_step_forward_rt)
+vif(lm_revenue_step_forward_rt)
+```
+
+Refitted Results:
+
+Backward elimination model, transformed:
+- Uses 26 variables (same as before)
+- 5 variables where p-value > 0.05 (same as before)
+- Adjusted R^2 value of 0.5872 (old value was 0.5863)
+- No multicolinearity issues (same as before)
+
+Forward selection model, transformed:
+- Uses 22 variables (same as before)
+- 1 variable where p-value > 0.05 (same as before)
+- Adjusted R^2 value of 0.5864 (old value was 0.5856)
+- No multicolinearity issues (same as before)
+
+Based on these results, we will still use the forward selection model, as it uses fewer variables than the backward elimination model and a nearly identical adjusted R^2 value.
+
+### Predictions
+
+Using our most successful model, we can split the data into training and testing sets, make predictions, and assess the accuracy of our model using MAE (mean absolute error) and MAPE (mean absolute percent error). We will also plot our actual vs. predicted values to visualize our model's performance.
+
+Split data into training and testing sets:
+```{r}
+#split data into training and testing sets using caTools library
+split <- sample.split(movies_d_removed$rt_revenue, SplitRatio = 0.7)
+
+movies_d_train_revenue <- movies_d_removed[split, ]
+movies_d_test_revenue <- movies_d_removed[!split, ]
+```
+
+Refit model on training data:
+```{r}
+lm_revenue_final <- lm(rt_revenue ~ budget + vote_count + major_prod_company_TRUE + 
+    genres_Family + prod_in_US_TRUE + popularity + release_month_12 + 
+    genres_Drama + runtime + genres_Western + `genres_Science Fiction` + 
+    genres_Foreign + release_month_6 + genres_Documentary + genres_Romance + 
+    release_month_9 + release_month_11 + release_month_7 + spoken_lang_en_TRUE + 
+    genres_Horror + release_month_3 + release_month_5, 
+    data = movies_d_train_revenue)
+```
+
+Make predictions and calculate MAE and MAPE:
+```{r}
+actual_values_revenue <- movies_d_test_revenue$rt_revenue
+actual_values_revenue_untrans <- movies_d_test_revenue$revenue
+
+predicted_values_revenue <- predict(lm_revenue_final, newdata = movies_d_test_revenue)
+
+# MAE with root transformation
+mae_revenue_1 <- mean(abs(actual_values_revenue - predicted_values_revenue), na.rm = TRUE)
+mae_revenue_1
+
+# MAE without root transformation
+mae_revenue_2 <- mean(abs(actual_values_revenue_untrans - (predicted_values_revenue^6)), na.rm = TRUE)
+mae_revenue_2
+
+# MAPE
+mape_revenue_rt <- mean((abs((actual_values_revenue - predicted_values_revenue) / actual_values_revenue) * 100), na.rm = TRUE)
+mape_revenue_rt
+```
+
+An MAE of 2.561841 means that our average prediction error for the 6th root of revenue was about 2.56. Our MAPE was 18.54652, meaning that our average prediction error percent was about 18.5%. When we undo the 6th root transformation on the predicted values and compare them to the original untransformed revenue values, we get an MAE of 91162384. This means that our average prediction error without the transformation was $91,162,384.
+
+Plot of actual vs. predicted values:
+```{r}
+df_preds <- data.frame(actual = actual_values_revenue, actual_untrans = actual_values_revenue_untrans, predicted = predicted_values_revenue)
+
+ggplot(df_preds, aes(x = actual, y = predicted)) +
+  geom_point() +
+  geom_abline(intercept = 0, slope = 1, color = "red", linewidth = 1) +
+  labs(
+    title = "Actual vs Predicted Values for 6th Root of revenue",
+    x = "Actual Values",
+    y = "Predicted Values"
+  ) +
+  theme_minimal()
+
+# undo root transformation
+ggplot(df_preds, aes(x = actual_untrans, y = predicted^6)) +
+  geom_point() +
+  geom_abline(intercept = 0, slope = 1, color = "red", linewidth = 1) +
+  labs(
+    title = "Actual vs Predicted Values for revenue",
+    x = "Actual Values",
+    y = "Predicted Values"
+  ) +
+  theme_minimal()
+```
+
+From the first plot of values with the 6th root transformation, we can see that our predicted values are usually fairly close to the actual values. Most points fit well along the line, with some points at either end of the graph that have predicted values that are slightly too high. Overall, though, these predictions are decently accurate. If we look at the second graph of the untransformed values, we can see that most points still fit well along the line. However, there are definitely some points that have predicted values that are far too high. Considering there are about a thousand predictions, though, there are not too many that are wildly inaccurate.
+
+Overall, this model does a decent job at predicting *revenue*.
+
+## Linear Regression - vote_average
+
+### Model Selection
+
+Now, we will use linear regression to predict *vote_average*. We will start with a basic model using all variables in the data set with dummy variables. Since vote_average had a normal distribution, no transformation was necessary.
+
+vote_average model with all variables:
+```{r}
+lm_vote_all <- lm(vote_average ~ . - revenue - rt_revenue, data = movies_d)
+summary(lm_vote_all)
+```
+
+We will now try both backward elimination and forward selection to find the best possible model.
+
+Backward elimination:
+```{r}
+lm_vote_step_back <- step(lm_vote_all, direction = "backward", trace = FALSE)
+lm_vote_step_back
+```
+
+Forward selection:
+```{r}
+lm_vote_none <- lm(vote_average ~ 1, data = movies_d)
+
+lm_vote_step_forward <- step(lm_vote_none, direction = "forward", scope = formula(lm_vote_all), trace = FALSE)
+lm_vote_step_forward
+```
+
+Compare both model summaries and look for multicolinearity:
+```{r}
+# backward
+summary(lm_vote_step_back)
+vif(lm_vote_step_back)
+
+# forward
+summary(lm_vote_step_forward)
+vif(lm_vote_step_forward)
+```
+
+Results:
+
+Backward elimination model:
+- Uses 26 variables
+- 4 variables where p-value > 0.05
+- Adjusted R^2 value of 0.4546
+- No multicolinearity issues
+
+Forward selection model:
+- Uses 22 variables
+- 3 variables where p-value > 0.05
+- Adjusted R^2 value of 0.4538
+- No multicolinearity issues
+
+We suspect that the forward selection model will be better as it uses fewer variables but has a similar R^2 value to the backward elimination model. However, let's investigate both models further.
+
+### Model Performance
+
+We should check the models' performance by examining the residuals vs. fits plot, the normal Q-Q plot, and looking for outliers/influential points.
+
+Studentized residuals vs predicted values:
+```{r}
+# backward
+
+plot(fitted(lm_vote_step_back), rstandard(lm_vote_step_back), main = "Residuals vs. Fitted Values plot for backward model")
+abline(a = 0, b = 0, col = 'black')
+
+# forward
+
+plot(fitted(lm_vote_step_forward), rstandard(lm_vote_step_forward), main = "Residuals vs. Fitted Values plot for forward model")
+abline(a = 0, b = 0, col = 'black')
+```
+
+The shapes and spreads of the points on both plots are okay - they also look very similar to each other. The non-uniform and pointed shapes of the points of both plots suggest that some heteroscedasticity is present. As well, the slightly heavier concentrations of points on the left side of both plots imply that the variability of the residuals is not even across predicted values.
+
+Normal probability plot of residuals:
+```{r}
+# backward
+qqnorm(rstandard(lm_vote_step_back))
+qqline(rstandard(lm_vote_step_back), col = 2)
+
+# forward
+qqnorm(rstandard(lm_vote_step_forward))
+qqline(rstandard(lm_vote_step_forward), col = 2)
+```
+
+The results from both plots look decent. The majority of points fit along the trendline for both plots, with some points that are below or above it, especially where the theoretical quantiles are below -2. However, most points fit well along the trendline in both plots - they are nearly the same.
+
+From the results of our investigation into these two models, we have concluded that the forward selection model would be better to use for making predictions. The results of both models' residuals vs. fits and normal Q-Q plots were nearly identical, so we have selected the forward selection model as it uses fewer variables.
+
+### Outliers/Influential Points
+
+Before we make predictions, we should look for and remove outliers/influential points.
+
+```{r}
+influencePlot(lm_vote_step_forward)
+summary(influence.measures(lm_vote_step_forward))
+```
+
+Data points 4046, 2221, 4665, 96, and 547 are outliers. We will remove them from the data and refit the model.
+
+```{r}
+# remove outliers
+movies_d_removed <- movies_d[-c(4046, 2221, 4665, 96, 547), ]
+```
+
+```{r}
+# refit model, try both backward elimination and forward selection to see if they arrive at different models this time
+
+# backward
+lm_vote_all <- lm(vote_average ~ . - revenue - rt_revenue, data = movies_d_removed)
+
+lm_vote_step_back <- step(lm_vote_all, direction = "backward", trace = FALSE)
+
+summary(lm_vote_step_back)
+vif(lm_vote_step_back)
+
+# forward
+lm_vote_none <- lm(vote_average ~ 1, data = movies_d_removed)
+
+lm_vote_step_forward <- step(lm_vote_none, direction = "forward", scope = formula(lm_vote_all), trace = FALSE)
+
+summary(lm_vote_step_forward)
+vif(lm_vote_step_forward)
+```
+
+Refitted results:
+
+Backward elimination model:
+- Uses 26 variables (same as before)
+- 3 variables where p-value > 0.05 (old value was 4)
+- Adjusted R^2 value of 0.4552 (old value was 0.4546)
+- No multicolinearity issues
+
+Forward selection model:
+- Uses 23 variables (old value was 22)
+- 4 variables where p-value > 0.05 (old value was 3)
+- Adjusted R^2 value of 0.4544 (old value was 0.4538)
+- No multicolinearity issues
+
+We still feel that the forward selection model is better, as it uses fewer variables and still has a very similar R^2 value to the backward elimination model.
+
+### Predictions
+
+Using our most successful model, we can split the data into training and testing sets, make predictions, and assess the accuracy of our model using MAE (mean absolute error) and MAPE (mean absolute percent error). We will also plot our actual vs. predicted values to visualize our model's performance.
+
+Split data into training and testing sets:
+```{r}
+#split data into training and testing sets using caTools library
+split <- sample.split(movies_d_removed$vote_average, SplitRatio = 0.7)
+
+movies_d_train_vote <- movies_d_removed[split, ]
+movies_d_test_vote <- movies_d_removed[!split, ]
+```
+
+Refit model on training data:
+```{r}
+lm_vote_final <- lm(vote_average ~ runtime + vote_count + budget + genres_Drama + 
+    genres_Animation + release_year + genres_Documentary + prod_in_US_TRUE + 
+    `genres_Science Fiction` + genres_Horror + genres_Comedy + 
+    genres_Adventure + spoken_lang_en_TRUE + release_month_2 + 
+    release_month_8 + genres_Thriller + genres_Crime + popularity + 
+    genres_Fantasy + major_prod_company_TRUE + release_month_6 + 
+    genres_Mystery + genres_Foreign, data = movies_d_train_vote)
+```
+
+Make predictions and calculate MAE and MAPE:
+```{r}
+actual_values_vote <- movies_d_test_vote$vote_average
+predicted_values_vote <- predict(lm_vote_final, newdata = movies_d_test_vote)
+
+# MAE
+mae_vote <- mean(abs(actual_values_vote - predicted_values_vote), na.rm = TRUE)
+mae_vote
+
+# MAPE
+mape_vote <- mean((abs((actual_values_vote - predicted_values_vote) / actual_values_vote) * 100), na.rm = TRUE)
+mape_vote
+```
+
+Our predictions of *vote_average* are fairly accurate. The MAE of 0.4903668 means that the average error of our predictions is about 0.49 points (on the point scale ranging from 0.0 to 10.0), and the MAPE of 8.282365 means that the average percent error of our predictions is about 8.3%.
+
+Plot of actual vs. predicted values:
+```{r}
+df_preds <- data.frame(actual = actual_values_vote, predicted = predicted_values_vote)
+
+ggplot(df_preds, aes(x = actual, y = predicted)) +
+  geom_point() +
+  geom_abline(intercept = 0, slope = 1, color = "red", linewidth = 1) +
+  labs(
+    title = "Actual vs Predicted Values for vote_average",
+    x = "Actual Values",
+    y = "Predicted Values"
+  ) +
+  xlim(2.5, 10) +
+  ylim(2.5, 10) +
+  theme_minimal()
+```
+
+From this graph, we can see that our predictions for actual values of low scores (below 5.0) tended to be too high. Otherwise, most points fit decently well along the line, which means most predicted values were close to the actual values.
+
+Overall, this model does a good job at predicting *vote_average*.
+
+# Reflection
+
+Both of our models do well at predicting their outcome variables, but our model for *vote_average* was by far the more successful model. It had a low MAE, giving predicted values that were only, on average, about half a point off from the actual values. Our model for *revenue* had an MAPE of about 18.5%, meaning its predictions were decently accurate when using the 6th root transformation. However, with the transformation undone, its MAE was $91,162,384. So, there is room for improvement for this model. Regardless, we are still pleased with both models.
+
+If we were to do this project again, we would consider exploring more complex transformations to try on *revenue*, or trying more advanced modeling methods, such as xgboost. We also acknowledge that there are factors that may be contributing to *revenue* that are not included in our data set.
